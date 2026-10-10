@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # ビルドに使う ModLoader（Mod SDK）の版。wots4-mods のタグかコミット
+  WOTS4_SDK_REF: d2c4849c3ba7f71a7d05dc65c0f30fb10de7facd
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mod
+
+      # wots4-mods が private のあいだは、読める PAT（WOTS4_SDK_TOKEN）が要る
+      - uses: actions/checkout@v4
+        with:
+          repository: nagataaaas/wots4-mods
+          ref: ${{ env.WOTS4_SDK_REF }}
+          path: sdk
+          token: ${{ secrets.WOTS4_SDK_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: テスト用の Python パッケージを入れる
+        run: python -m pip install cryptography
+
+      - name: build and test
+        run: |
+          cmake -S mod -B build -A Win32 -DWOTS4_SDK_DIR="${{ github.workspace }}/sdk"
+          cmake --build build --config Release
+          ctest --test-dir build -C Release -LE needs_exe --output-on-failure --timeout 300
