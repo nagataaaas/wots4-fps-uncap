@@ -1,0 +1,54 @@
+# 解析資料（解析ツール・解析した情報・exe など）はコミットしない
+/research/
+
+# AI まわり
+AGENTS.md
+CLAUDE.md
+.claude
+.codex
+.agents
+TODO.md
+.ignore
+
+# claude-code-runtime
+**/.claude/scheduled_tasks.lock
+**/.claude/scheduled_tasks.json
+**/.claude/routines/.state/
+**/.claude/worktrees/
+**/.claude/checkpoints/
+**/.claude/mailbox/
+**/.claude/agent-registry.json
+**/.claude/agent-memory-local
+**/.claude/first-run
+**/.claude/assistant-daemon-state.json
+
+# ビルドの出力
+build/
+out/
+stage/
+dist/
+*.obj
+*.o
+*.exp
+*.lib
+*.pdb
+*.ilk
+*.dll
+*.exe
+__pycache__/
+
+# ログ
+logs
+*.log
+
+# エディタ
+*.local
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

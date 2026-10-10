@@ -1,0 +1,3 @@
+LIBRARY mod
+EXPORTS
+    Wots4ModInitialize=_ModInitialize@4
