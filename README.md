@@ -1,4 +1,4 @@
-# smooth_fps
+# fps_uncap
 
 『侍道4』の 30FPS の上限を外す Mod です。
 

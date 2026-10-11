@@ -10,7 +10,7 @@ permissions:
 
 env:
   WOTS4_SDK_REF: d2c4849c3ba7f71a7d05dc65c0f30fb10de7facd
-  MOD_NAME: smooth_fps
+  MOD_NAME: fps_uncap
 
 jobs:
   release:

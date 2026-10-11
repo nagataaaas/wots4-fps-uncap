@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(wots4_mod_smooth_fps LANGUAGES C CXX)
+project(wots4_mod_fps_uncap LANGUAGES C CXX)
 
 # 単体でビルドするときは -DWOTS4_SDK_DIR=<wots4-mods のパス> を渡す
 if(NOT COMMAND wots4_add_mod)
@@ -13,4 +13,4 @@ if(NOT COMMAND wots4_add_mod)
 endif()
 
 # まだ中身はない。配布はしない。
-wots4_add_mod(smooth_fps SOURCES src/mod.cpp DEF src/mod.def NO_RELEASE)
+wots4_add_mod(fps_uncap SOURCES src/mod.cpp DEF src/mod.def NO_RELEASE)
