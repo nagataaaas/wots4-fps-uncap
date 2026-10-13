@@ -12,8 +12,7 @@ Removes the 30 FPS cap of Way of the Samurai 4 so the game runs at 60 FPS.
 
 ## Features
 
-- Normal play runs at 60 FPS. Characters, the camera, menu and icon animations, and the cursor repeat while a key is held are kept at the same speed as at 30 FPS.
-- During scripts (events, cut-ins, shops and so on), the game goes back to 30 FPS.
+- The whole game runs at 60 FPS, events and cut-ins included. Characters, the camera, events, menu and icon animations, and the cursor repeat while a key is held are kept at the same speed as at 30 FPS.
 - No game file is changed; the Mod works in memory only.
 
 ## Limitations
