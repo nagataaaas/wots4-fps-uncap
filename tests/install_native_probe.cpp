@@ -12,7 +12,7 @@ constexpr unsigned stepSeconds = 0x99dca8;
 constexpr unsigned managerStepSeconds = 0x97cdc4;
 constexpr unsigned layoutStepSeconds = 0x9ddd64;
 constexpr unsigned redirectCount = 203;
-constexpr unsigned immediateCount = 89;
+constexpr unsigned immediateCount = 90;
 // Replaced functions: action script timer, scene clock, script Wait, hang seconds, press window.
 // Jumps: command wait, balloon life, action end time-out, mill step, kick threshold, sound fade,
 // blood drops, placed effects (2), vitality charm, item motion.
@@ -361,7 +361,7 @@ int main(int argc, char** argv) {
         claimed(0x51e664,5)&&claimed(0x5a06c3,18));
     check("the three step constants are claimed",
         claimed(stepSeconds,8)&&claimed(managerStepSeconds,4)&&claimed(layoutStepSeconds,4));
-    check("203 operands (4 bytes) and 89 immediates (4 or 1 bytes) are claimed",
+    check("203 operands (4 bytes) and 90 immediates (4 or 1 bytes) are claimed",
         claims.size()==hookClaims+stepClaims+redirectCount+immediateCount&&claimed(0x44d571+2,4)&&
         claimed(0x5b8775+2,4)&&claimed(0x56a8b2+2,4)&&claimed(0x51ee6b+2,4)&&claimed(0x67eadb+3,4)&&
         claimed(0x4453e7+6,1)&&claimed(0x5619e4+6,4)&&claimed(0x5ab932+8,1)&&claimed(0x4e65d8+6,1));
@@ -454,6 +454,8 @@ int main(int argc, char** argv) {
         actionEndCheck(100)==2&&actionEndCheck(180)==2&&actionEndCheck(181)==1);
     check("action scripts: op165 counts 120, AI commands retry after 60",
         immediateAt(0x411de1+3)==120&&byteAt(0x419147+3)==60&&byteAt(0x419618+3)==60);
+    check("action scripts: talk choices left alone for 150 frames (151 updates) time out after 301 (302)",
+        immediateAt(0x419950+1)==301);
     const int balloonLife=balloonLifeAfterStore(5);
     check("balloons: a life of 5 (6 updates) becomes 11 (12), ecx comes back",
         balloonLife==11&&ecxAfterBalloon==0x12345678);
