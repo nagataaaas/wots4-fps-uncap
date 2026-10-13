@@ -20,6 +20,7 @@
 // written again, and its options re-applied (vt+0x1c), when the rate changes.
 #include <wots4/mod_api.h>
 #include <MinHook.h>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include "step_values.h"
@@ -33,6 +34,12 @@ HMODULE self;
 const wots4::HostApi* host;
 
 uintptr_t va(uintptr_t address) { return gameBase+address-0x400000; }
+
+// HostApi only grows at the end, so an older ModLoader still serves this Mod when it
+// reaches releaseClaims, the last member used here.
+bool hostHasUsedMembers(const wots4::HostApi* candidate) {
+    return candidate->size>=offsetof(wots4::HostApi,releaseClaims)+sizeof(candidate->releaseClaims);
+}
 
 bool same(uintptr_t address, const unsigned char* bytes, size_t count) {
     return !memcmp(reinterpret_cast<const void*>(va(address)),bytes,count);
@@ -569,7 +576,7 @@ bool installed;
 
 extern "C" BOOL WINAPI ModInitialize(const wots4::ModContext* context) {
     if(!context||context->size<sizeof(*context)||context->version!=wots4::modApiVersion||!context->host||
-        context->host->size<sizeof(wots4::HostApi)||!context->host->claim||!context->host->releaseClaims)
+        !hostHasUsedMembers(context->host)||!context->host->claim||!context->host->releaseClaims)
         return FALSE;
     if(installed)
         return TRUE;
