@@ -58,10 +58,13 @@ inline unsigned scaledUpdateCount(unsigned countAtGameRate, unsigned updatesPerS
     return (countAtGameRate*updatesPerSecond+gameUpdatesPerSecond/2)/gameUpdatesPerSecond;
 }
 
-// Scripts (events, cut-ins, shops, torture...) count frames in many places this Mod does not
-// correct yet, so they keep the game's own rate.
-inline unsigned updatesPerSecondFor(bool scriptRunning, unsigned highRate) {
-    return scriptRunning ? gameUpdatesPerSecond : highRate;
+// Many waits store a count n of 30 fps frames and hold for n + 1 updates (they end when a
+// counter passes n). The holds are what must last as long: the stored count for updatesPerSecond.
+// Negative counts mean "no wait" or "forever" and are kept.
+inline int scaledHoldCount(int framesAtGameRate, unsigned updatesPerSecond) {
+    if(framesAtGameRate<0)
+        return framesAtGameRate;
+    return static_cast<int>(scaledUpdateCount(static_cast<unsigned>(framesAtGameRate)+1,updatesPerSecond))-1;
 }
 
 }  // namespace fps_uncap

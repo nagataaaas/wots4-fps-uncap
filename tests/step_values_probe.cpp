@@ -44,8 +44,13 @@ int main() {
     check("update counts round to the nearest update (700 at 45 is 1050, 1 at 45 is 2)",
         fps_uncap::scaledUpdateCount(700,45)==1050&&fps_uncap::scaledUpdateCount(1,45)==2);
 
-    check("a running script keeps 30 updates",fps_uncap::updatesPerSecondFor(true,60)==30);
-    check("outside scripts the high rate is used",fps_uncap::updatesPerSecondFor(false,60)==60);
+    const double talkTurnDecay=0.8999999761581421, talkTurnStep=0.15707960362851026;
+    auto talkTurn60=fps_uncap::perUpdateValue(PerUpdate::amountUnderDecay,talkTurnStep,60,talkTurnDecay);
+    check("60 updates: a step under a decay keeps its limit c/(1-k)",
+        near(talkTurn60/(1-std::sqrt(talkTurnDecay)),talkTurnStep/(1-talkTurnDecay)));
+    check("60 updates: gains double (30 frames per second -> 60 updates per second), weights follow 1-(1-w)^r",
+        fps_uncap::perUpdateValue(PerUpdate::gain,30.0,60)==60.0 &&
+        near(fps_uncap::perUpdateValue(PerUpdate::weight,0.1,60),1-std::sqrt(0.9)));
 
     printf("RESULT tests=%u failures=%u\n",tests,failures);
     return failures?1:0;
