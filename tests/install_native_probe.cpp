@@ -1,8 +1,9 @@
 // Installs mod.dll on a copy of the exe mapped into this process and checks every value it
 // writes, then calls the hooked functions through their entry points. The rest of each hooked
 // function needs the running game, so after installation the code right after the part MinHook
-// moved is replaced with a short return that records what the hook passed on. Never attaches to
-// the game process or reads saves.
+// moved is replaced with a short return that records what the hook passed on. Then chooses 120,
+// 90 and 30 on the options page as the player would and checks the values again. Never attaches
+// to the game process or reads saves; config.ini is written in a temporary folder only.
 #include <cstdlib>
 #include "mapped_exe.h"
 
@@ -12,12 +13,15 @@ constexpr unsigned stepSeconds = 0x99dca8;
 constexpr unsigned managerStepSeconds = 0x97cdc4;
 constexpr unsigned layoutStepSeconds = 0x9ddd64;
 constexpr unsigned redirectCount = 203;
-constexpr unsigned immediateCount = 90;
-// Replaced functions: action script timer, scene clock, script Wait, hang seconds, press window.
-// Jumps: command wait, balloon life, action end time-out, mill step, kick threshold, sound fade,
-// blood drops, placed effects (2), vitality charm, item motion.
-constexpr unsigned hookClaims = 5+11;
+constexpr unsigned immediateCount = 88;
+// Replaced functions: frame limiter, action script timer, scene clock, script Wait, hang seconds,
+// press window. Jumps: command wait, balloon life, action end time-out, mill step, kick threshold,
+// sound fade, blood drops, placed effects (2), vitality charm, item motion, Rensatsu start wait,
+// hang time-out sound. Branches: the hang cycle (2).
+constexpr unsigned hookClaims = 6+13+2;
 constexpr unsigned stepClaims = 3;
+// The choices of the options page
+constexpr uint32_t choice30 = 0, choice90 = 2, choice120 = 3;
 
 static unsigned char* uiManager;     // [0x9ebb8c]
 static unsigned char* saveDataManager;  // [0x9e96d4]
@@ -289,6 +293,100 @@ static int placedEffectRepeat(int interval, int randomPart) {
     return *(int*)(effect+0x28);
 }
 
+// The Rensatsu start with no script system (0x43cdce) after waitedUpdates in [ebx+0x24]: 2 keeps
+// waiting (0x43cdf7), 1 goes on (0x43cdd4).
+static int rensatsuStartCheck(int waitedUpdates) {
+    const unsigned char returnOne[]={0xb8,1,0,0,0,0xc3};
+    const unsigned char returnTwo[]={0xb8,2,0,0,0,0xc3};
+    writeBytes(0x43cdd4,returnOne,sizeof(returnOne));
+    writeBytes(0x43cdf7,returnTwo,sizeof(returnTwo));
+    static unsigned char rensatsu[0x30];
+    *(int*)(rensatsu+0x24)=waitedUpdates;
+    auto site=va(0x43cdce);
+    auto rensatsuAddress=rensatsu;
+    int result;
+    __asm {
+        push ebx
+        mov ebx, rensatsuAddress
+        call site
+        mov result, eax
+        pop ebx
+    }
+    return result;
+}
+
+// The hang time-out sound (0x5a7e8f) with the word [esi+0xb6] = updates: 1 plays it (0x5a7e99),
+// 2 does not (0x5a7eb2).
+static int hangTimeoutSoundCheck(short updates) {
+    const unsigned char returnOne[]={0xb8,1,0,0,0,0xc3};
+    const unsigned char returnTwo[]={0xb8,2,0,0,0,0xc3};
+    writeBytes(0x5a7e99,returnOne,sizeof(returnOne));
+    writeBytes(0x5a7eb2,returnTwo,sizeof(returnTwo));
+    static unsigned char hang[0xc0];
+    *(short*)(hang+0xb6)=updates;
+    auto site=va(0x5a7e8f);
+    auto hangAddress=hang;
+    int result;
+    __asm {
+        push esi
+        mov esi, hangAddress
+        call site
+        mov result, eax
+        pop esi
+    }
+    return result;
+}
+
+// The frame limiter (0x686bd0) as the main loop calls it: esi = timer, a force byte pushed.
+struct FrameTimer { float nextUpdate, realigned, gameSeconds; unsigned char gameTimeRuns; };
+// The limiter writes the timer inside inline assembly, which the optimizer does not see, so the
+// clock is read through volatile right where it is needed.
+static float gameClock(const FrameTimer& timer) { return *(const volatile float*)&timer.gameSeconds; }
+// The clock before a limiter call, kept in memory for the same reason.
+static volatile float secondsBeforeUpdate;
+static bool limiterRunsUpdate(FrameTimer* timer, bool force) {
+    auto limiter=va(0x686bd0);
+    int forceArgument=force;
+    unsigned char due;
+    __asm {
+        push esi
+        mov esi, timer
+        push forceArgument
+        call limiter
+        mov due, al
+        pop esi
+    }
+    return due!=0;
+}
+
+static double secondsSince(const LARGE_INTEGER& start) {
+    LARGE_INTEGER now, frequency;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&frequency);
+    return double(now.QuadPart-start.QuadPart)/double(frequency.QuadPart);
+}
+
+// Calls the limiter until it runs an update, like the main loop: the seconds that took.
+static double secondsUntilNextUpdate(FrameTimer* timer) {
+    LARGE_INTEGER start;
+    QueryPerformanceCounter(&start);
+    while(!limiterRunsUpdate(timer,false) && secondsSince(start)<1.0) {}
+    return secondsSince(start);
+}
+
+// The player picks a rate on the options page, then the game finishes its update.
+static void chooseOnOptionsPage(uint32_t choice) {
+    pageCallbacks.changed(pageCallbacks.context,0,choice);
+    frameCallback(nullptr);
+}
+
+static std::wstring configPath;
+static std::wstring savedFps() {
+    wchar_t text[16];
+    GetPrivateProfileStringW(L"frame_rate",L"fps",L"",text,16,configPath.c_str());
+    return text;
+}
+
 // The torture press window (0x5a4cc0) on a torture with [+0x50] = updates of the swing.
 static int swinging;
 static int __fastcall fakeIsSwinging(void*) { return swinging; }
@@ -335,10 +433,20 @@ int main(int argc, char** argv) {
     *(void**)va(0x9e964c)=cameraManager;
     *(void**)va(0x9e967c)=gameOptions;
 
+    // A config.ini with a rate that cannot be chosen, in a folder of its own
+    wchar_t temporary[MAX_PATH];
+    GetTempPathW(MAX_PATH,temporary);
+    std::wstring directory=std::wstring(temporary)+L"fps_uncap_probe_"+std::to_wstring(GetCurrentProcessId())+L"\\";
+    CreateDirectoryW(directory.c_str(),nullptr);
+    configPath=directory+L"config.ini";
+    WritePrivateProfileStringW(L"frame_rate",L"fps",L"75",configPath.c_str());
+
     auto mod=LoadLibraryA(argv[2]);
     auto initialize=mod?(wots4::Initialize)GetProcAddress(mod,"Wots4ModInitialize"):nullptr;
-    wots4::HostApi host{sizeof(host),wots4::modApiVersion,hostLog,hostClaim,hostRelease};
-    wots4::ModContext context{sizeof(context),wots4::modApiVersion,nullptr,mod,(HMODULE)imageBase,L".\\",&host};
+    wots4::HostApi host{sizeof(host),wots4::modApiVersion,hostLog,hostClaim,hostRelease,hostAddOptionsPage,
+        hostOnFrame,hostOnOptionsSaved};
+    wots4::ModContext context{sizeof(context),wots4::modApiVersion,nullptr,mod,(HMODULE)imageBase,
+        directory.c_str(),&host};
     check("mod.dll exports Wots4ModInitialize",initialize!=nullptr);
     if(!initialize) { printf("RESULT tests=%u failures=%u\n",tests,failures+1); return 1; }
 
@@ -353,25 +461,50 @@ int main(int argc, char** argv) {
     changed[1]=0x0d;
 
     check("with the known code, the Mod initializes",initialize(&context)!=FALSE);
+    check("config.ini fps=75 is refused with a warning and the default 60 is used",
+        loggedText("[frame_rate] fps=75 is not one of 30, 60, 90, 120; using the default 60"));
     check("the installation is logged",loggedText("installed: 60 updates per second, scripts included"));
-    check("the replaced functions are claimed (6, 6, 6, 6 and 5 bytes)",
-        claimed(0x4185c0,6)&&claimed(0x58ded0,6)&&claimed(0x590c20,6)&&claimed(0x5a6fc0,6)&&claimed(0x5a4cc0,5));
-    check("the code jumps are claimed (6, 6, 6, 12, 5 and 18 bytes)",
+    check("the replaced functions are claimed (6, 6, 6, 6, 6 and 5 bytes)",
+        claimed(0x686bd0,6)&&claimed(0x4185c0,6)&&claimed(0x58ded0,6)&&claimed(0x590c20,6)&&claimed(0x5a6fc0,6)&&
+        claimed(0x5a4cc0,5));
+    check("the code jumps are claimed (6, 6, 6, 12, 5, 18, 6 and 10 bytes) and the 2 hang cycle branches",
         claimed(0x40b8ff,6)&&claimed(0x5b088d,6)&&claimed(0x41974d,6)&&claimed(0x5ab012,12)&&
-        claimed(0x51e664,5)&&claimed(0x5a06c3,18));
+        claimed(0x51e664,5)&&claimed(0x5a06c3,18)&&claimed(0x43cdce,6)&&claimed(0x5a7e8f,10)&&
+        claimed(0x5a892c,1)&&claimed(0x5a893c,1));
     check("the three step constants are claimed",
         claimed(stepSeconds,8)&&claimed(managerStepSeconds,4)&&claimed(layoutStepSeconds,4));
-    check("203 operands (4 bytes) and 90 immediates (4 or 1 bytes) are claimed",
+    check("203 operands (4 bytes) and 88 immediates (4 or 1 bytes) are claimed",
         claims.size()==hookClaims+stepClaims+redirectCount+immediateCount&&claimed(0x44d571+2,4)&&
         claimed(0x5b8775+2,4)&&claimed(0x56a8b2+2,4)&&claimed(0x51ee6b+2,4)&&claimed(0x67eadb+3,4)&&
         claimed(0x4453e7+6,1)&&claimed(0x5619e4+6,4)&&claimed(0x5ab932+8,1)&&claimed(0x4e65d8+6,1));
-    check("the frame limiter is left to the game",*(unsigned char*)va(0x686bd0)==0x55);
-    const unsigned jumpSites[]={0x4185c0,0x58ded0,0x590c20,0x5a6fc0,0x5a4cc0,0x40b8ff,0x5b088d,0x41974d,0x5ab012,
-        0x51e664,0x5a06c3,0x4b7876,0x4b98bc,0x4b9abc,0x484c2e,0x520ab6};
+    const unsigned jumpSites[]={0x686bd0,0x4185c0,0x58ded0,0x590c20,0x5a6fc0,0x5a4cc0,0x40b8ff,0x5b088d,0x41974d,
+        0x5ab012,0x51e664,0x5a06c3,0x4b7876,0x4b98bc,0x4b9abc,0x484c2e,0x520ab6,0x43cdce,0x5a7e8f};
     bool allJump=true;
     for(auto site:jumpSites)
         allJump=allJump&&byteAt(site)==0xe9;
-    check("every hook and code jump starts with a jmp",allJump);
+    check("every hook and code jump starts with a jmp, the frame limiter included",allJump);
+    check("the options page has the rate (4 choices, default 60) and the slowdown notice for 90 and 120",
+        pageItems.size()==2&&pageItems[0].kind==wots4::optionChoice&&pageItems[0].choiceCount==4&&
+        pageItems[0].defaultValue==1&&pageItems[1].kind==wots4::optionNotice&&pageItems[1].choiceCount==(4u|8u));
+    uint32_t shownChoice=99;
+    pageCallbacks.read(pageCallbacks.context,&shownChoice,2);
+    check("the page shows 60",shownChoice==1);
+    check("the frame and options save callbacks are registered",frameCallback&&optionsSavedCallback);
+
+    // The frame limiter
+    FrameTimer timer{};
+    timer.gameTimeRuns=1;
+    check("limiter: forced, an update runs and the game clock moves 1/60 s",
+        limiterRunsUpdate(&timer,true)&&gameClock(timer)==1.0f/60.0f);
+    check("limiter: the first call runs an update at once",limiterRunsUpdate(&timer,false));
+    check("limiter: right after an update, the next is not due",!limiterRunsUpdate(&timer,false));
+    const double waited60=secondsUntilNextUpdate(&timer);
+    check("limiter: the next update runs 1/60 s after the last",waited60>=1.0/60-0.0005&&waited60<1.0/60+0.01);
+    timer.gameTimeRuns=0;
+    secondsBeforeUpdate=gameClock(timer);
+    check("limiter: with the game clock stopped (menus), updates run and the clock stays",
+        limiterRunsUpdate(&timer,true)&&gameClock(timer)==secondsBeforeUpdate);
+    timer.gameTimeRuns=1;
 
     // The step
     check("0x99dca8 is float 1/60 widened",gameDouble(stepSeconds)==(double)(1.0f/60.0f));
@@ -436,10 +569,11 @@ int main(int argc, char** argv) {
     check("gameplay: AI perception every 12 or 30 updates, hit stop 4, action start invincibility 8",
         immediateAt(0x40a7c4+1)==12&&immediateAt(0x40a7e7+1)==30&&immediateAt(0x487d7c+1)==4&&
         immediateAt(0x49d638+1)==4&&immediateAt(0x43eb80+1)==4&&immediateAt(0x44a0c9+6)==8);
-    check("gameplay: Rensatsu slow motion over 16 updates at 1/16 each, ending 60 and 20, start wait 120",
+    check("gameplay: Rensatsu slow motion over 16 updates at 1/16 each, ending 60 and 20",
         immediateAt(0x43e8c1+3)==16&&byteAt(0x43e630+2)==16&&immediateAt(0x43e638+1)==16&&
-        valueAtOperand(0x43e63d)==0.0625&&immediateAt(0x43d594+6)==60&&immediateAt(0x43d59e+6)==20&&
-        byteAt(0x43cdce+3)==120);
+        valueAtOperand(0x43e63d)==0.0625&&immediateAt(0x43d594+6)==60&&immediateAt(0x43d59e+6)==20);
+    check("gameplay: the Rensatsu start keeps waiting through 120 updates and goes on at 121",
+        rensatsuStartCheck(120)==2&&rensatsuStartCheck(121)==1);
     check("gameplay: AI stance 30, move arrival 6 and give-up 60, neutral action after 30",
         byteAt(0x42b465+6)==30&&byteAt(0x42f611+1)==6&&byteAt(0x42f68a+3)==60&&byteAt(0x448c16+6)==30&&
         byteAt(0x4498b2+6)==30&&byteAt(0x44a3cc+6)==30);
@@ -483,6 +617,10 @@ int main(int argc, char** argv) {
     check("torture: counts doubled (success 60, press window 14, held button 40, mill window 20)",
         byteAt(0x5a5083+3)==60&&byteAt(0x5a4b8a+3)==14&&byteAt(0x4e65d8+6)==40&&byteAt(0x5ab932+8)==20&&
         byteAt(0x5ab921+7)==20);
+    check("torture: the hang time-out sound plays at 100 updates left, not at 50 or 99",
+        hangTimeoutSoundCheck(100)==1&&hangTimeoutSoundCheck(50)==2&&hangTimeoutSoundCheck(99)==2);
+    check("torture: the hang cycle 120 and 60 compares unsigned (jb, jae)",
+        byteAt(0x5a8925+6)==120&&byteAt(0x5a8935+6)==60&&byteAt(0x5a892c)==0x72&&byteAt(0x5a893c)==0x73);
 
     // Physics
     check("physics: kick velocity changes halved (-0.1, 0.2, 0.1)",
@@ -536,6 +674,72 @@ int main(int argc, char** argv) {
     check("sounds: a fade step moves half a frame and half the volume step",
         sound.frames==9.5f&&sound.volume==1.0f);
 
+    // 120 chosen on the options page
+    chooseOnOptionsPage(choice120);
+    check("120: the change is logged",loggedText("frame rate changed to 120 updates per second"));
+    check("120: the steps are float 1/120",gameDouble(stepSeconds)==(double)(1.0f/120.0f)&&
+        gameFloat(managerStepSeconds)==1.0f/120.0f&&gameFloat(layoutStepSeconds)==1.0f/120.0f);
+    check("120: amounts are a quarter, decays fourth roots, gains 4x",
+        valueAtOperand(0x5b8775)==0.25&&closeTo(pow(valueAtOperand(0x446551),4),(double)0.9f)&&
+        valueAtOperand(0x445288)==100.0&&valueAtOperand(0x4481ba)==120.0);
+    check("120: counts 4x (title 14000, camera 80, Rensatsu end 120, effect fade 120, torture success 120)",
+        immediateAt(0x67d262+2)==14000&&byteAt(0x4453e7+6)==80&&immediateAt(0x43d594+6)==120&&
+        byteAt(0x4a4a83+3)==120&&byteAt(0x5a5083+3)==120);
+    check("120: byte counts past 127 (hang cycle 240, stone first move 160)",
+        byteAt(0x5a8925+6)==240&&byteAt(0x5a8935+6)==120&&byteAt(0x5a8e7f+6)==160);
+    check("120: the Rensatsu start waits through 240, the hang sound plays at 200",
+        rensatsuStartCheck(240)==2&&rensatsuStartCheck(241)==1&&hangTimeoutSoundCheck(200)==1&&
+        hangTimeoutSoundCheck(100)==2);
+    check("120: an existing key repeat waits 44 then repeats every 12",repeatDelay()==44&&repeatInterval()==12);
+    check("120: an existing camera's copied weight is 1-0.4^(1/4)",
+        closeTo(cameraField(followCamera,0xc8),1-pow(1-(double)0.6f,0.25)));
+    check("120: a timer of 10 frames (11 updates) waits 43 updates (44), a Wait of 10 frames holds 44",
+        updatesBeforeTimerJumps(10)==43&&scriptWaitFramesAfterStart(10)==43);
+    check("120: the event scene clock advances a quarter frame per update",advanceSceneByOneFrame()==0.25f);
+    hang.updatesLeft=250;
+    check("120: the hang shows 250 updates left as 2 seconds",hangSeconds(&hang)==2);
+    check("120: before the swing, updates 152 (frame 38) press in time, 144 (36) not",
+        pressInWindow(152,false,0)&&!pressInWindow(144,false,0));
+    secondsBeforeUpdate=gameClock(timer);
+    check("120: forced, the game clock moves 1/120 s",
+        limiterRunsUpdate(&timer,true)&&gameClock(timer)==(float)(secondsBeforeUpdate+(double)(1.0f/120.0f)));
+    secondsUntilNextUpdate(&timer);
+    const double waited120=secondsUntilNextUpdate(&timer);
+    check("120: the next update runs 1/120 s after the last",waited120>=1.0/120-0.0005&&waited120<1.0/120+0.01);
+    optionsSavedCallback(nullptr);
+    check("120: the options save writes fps=120 to config.ini",savedFps()==L"120");
+
+    // 90
+    chooseOnOptionsPage(choice90);
+    check("90: the step is float 1/90, title 10500, key repeat 33 and 9, timer of 10 frames waits 32",
+        gameDouble(stepSeconds)==(double)(1.0f/90.0f)&&immediateAt(0x67d262+2)==10500&&repeatDelay()==33&&
+        repeatInterval()==9&&updatesBeforeTimerJumps(10)==32);
+    check("90: hang cycle 180 and 90, Rensatsu start waits through 180",
+        byteAt(0x5a8925+6)==180&&byteAt(0x5a8935+6)==90&&rensatsuStartCheck(180)==2&&rensatsuStartCheck(181)==1);
+
+    // 30: the game's own values
+    chooseOnOptionsPage(choice30);
+    check("30: the steps are the game's 1/30 again",gameDouble(stepSeconds)==originalStep&&
+        gameFloat(managerStepSeconds)==1.0f/30.0f&&gameFloat(layoutStepSeconds)==1.0f/30.0f);
+    check("30: amounts, decays and gains are the game's (UI 1.0, camera keep 0.9, mouse 25)",
+        valueAtOperand(0x5b8775)==1.0&&valueAtOperand(0x446551)==(double)0.9f&&valueAtOperand(0x445288)==25.0);
+    check("30: counts are the game's (title 3500, camera 20, hang cycle 60 and 30, stone 40, key repeat 11 and 3)",
+        immediateAt(0x67d262+2)==3500&&byteAt(0x4453e7+6)==20&&byteAt(0x5a8925+6)==60&&byteAt(0x5a8935+6)==30&&
+        byteAt(0x5a8e7f+6)==40&&repeatDelay()==11&&repeatInterval()==3);
+    check("30: timers, Waits, the scene clock and the Rensatsu start are the game's",
+        updatesBeforeTimerJumps(10)==10&&scriptWaitFramesAfterStart(10)==10&&advanceSceneByOneFrame()==1.0f&&
+        rensatsuStartCheck(60)==2&&rensatsuStartCheck(61)==1&&hangTimeoutSoundCheck(50)==1);
+    secondsUntilNextUpdate(&timer);
+    const double waited30=secondsUntilNextUpdate(&timer);
+    check("30: the next update runs 1/30 s after the last",waited30>=1.0/30-0.0005&&waited30<1.0/30+0.01);
+    optionsSavedCallback(nullptr);
+    check("30: the options save writes fps=30",savedFps()==L"30");
+    shownChoice=99;
+    pageCallbacks.read(pageCallbacks.context,&shownChoice,2);
+    check("30: the page shows 30",shownChoice==choice30);
+
+    DeleteFileW(configPath.c_str());
+    RemoveDirectoryW(directory.c_str());
     printf("RESULT tests=%u failures=%u; mapped exe copy in this process only\n",tests,failures);
     return failures?1:0;
 }

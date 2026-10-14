@@ -1,4 +1,4 @@
-// Checks, with the game's per-update constants as plain numbers, the values used at 30 and 60
+// Checks, with the game's per-update constants as plain numbers, the values used at 30, 60, 90 and 120
 // updates per second. Needs neither the exe nor the game.
 #include <cmath>
 #include <cstdio>
@@ -51,6 +51,18 @@ int main() {
     check("60 updates: gains double (30 frames per second -> 60 updates per second), weights follow 1-(1-w)^r",
         fps_uncap::perUpdateValue(PerUpdate::gain,30.0,60)==60.0 &&
         near(fps_uncap::perUpdateValue(PerUpdate::weight,0.1,60),1-std::sqrt(0.9)));
+
+    check("90 and 120 updates: amounts are a third and a quarter, three and four decays give one at 30",
+        near(fps_uncap::perUpdateValue(PerUpdate::amount,rensatsuDrain,90)*90,rensatsuDrain*30) &&
+        fps_uncap::perUpdateValue(PerUpdate::amount,1.0,120)==0.25 &&
+        near(std::pow(fps_uncap::perUpdateValue(PerUpdate::decay,spinDecay,90),3),spinDecay) &&
+        near(std::pow(fps_uncap::perUpdateValue(PerUpdate::decay,spinDecay,120),4),spinDecay));
+    check("90 and 120 updates: counts are 3x and 4x (key repeat 11 -> 33 and 44, 3500 -> 14000)",
+        fps_uncap::scaledUpdateCount(11,90)==33&&fps_uncap::scaledUpdateCount(11,120)==44&&
+        fps_uncap::scaledUpdateCount(3500,120)==14000);
+    check("90 and 120 updates: a hold of n + 1 = 11 updates becomes 33 and 44 (n = 32 and 43)",
+        fps_uncap::scaledHoldCount(10,90)==32&&fps_uncap::scaledHoldCount(10,120)==43&&
+        fps_uncap::scaledHoldCount(-1,120)==-1);
 
     printf("RESULT tests=%u failures=%u\n",tests,failures);
     return failures?1:0;

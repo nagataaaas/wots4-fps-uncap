@@ -68,6 +68,23 @@ inline BOOL WINAPI hostClaim(HMODULE, uintptr_t address, uint32_t length) {
     claims.push_back({(unsigned)address,length}); return TRUE;
 }
 inline void WINAPI hostRelease(HMODULE) { ++releases; claims.clear(); }
+
+// The options page and the callbacks, kept so a test can play the player and the game.
+inline std::vector<wots4::OptionItem> pageItems;
+inline wots4::OptionsPageCallbacks pageCallbacks{};
+inline wots4::GameEventCallback frameCallback, optionsSavedCallback;
+inline BOOL WINAPI hostAddOptionsPage(HMODULE, const wots4::LocalizedText*, const wots4::OptionItem* items,
+    uint32_t count, const wots4::OptionsPageCallbacks* callbacks) {
+    pageItems.assign(items,items+count);
+    pageCallbacks=*callbacks;
+    return TRUE;
+}
+inline BOOL WINAPI hostOnFrame(HMODULE, wots4::GameEventCallback callback, void*) {
+    frameCallback=callback; return TRUE;
+}
+inline BOOL WINAPI hostOnOptionsSaved(HMODULE, wots4::GameEventCallback callback, void*) {
+    optionsSavedCallback=callback; return TRUE;
+}
 inline bool claimed(unsigned address, unsigned length) {
     for(auto& c:claims)
         if(c.address==va(address)&&c.length==length) return true;

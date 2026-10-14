@@ -14,16 +14,17 @@ endif()
 
 wots4_use_minhook()
 
-wots4_add_mod(fps_uncap SOURCES src/mod.cpp DEF src/mod.def
-    LIBS wots4_minhook)
+wots4_add_mod(fps_uncap SOURCES src/mod.cpp src/settings.cpp DEF src/mod.def
+    LIBS wots4_minhook
+    FILES config.ini)
 target_include_directories(mod_fps_uncap PRIVATE src)
 
 if(WOTS4_BUILD_TESTS)
-    # Checks, with the game's per-update constants as numbers, the values at 30 and 60 updates
+    # Checks, with the game's per-update constants as numbers, the values at 30, 60, 90 and 120
     wots4_add_probe(step_values_probe SOURCES tests/step_values_probe.cpp
         INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    # Loads mod.dll into a copy of the exe and calls the hooked frame limiter in and out of a
-    # script (the game is not started)
+    # Loads mod.dll into a copy of the exe, calls the hooked functions and the frame limiter, and
+    # chooses 120, 90 and 30 on the options page (the game is not started)
     set(WOTS4_UNPACKED_EXE "${WOTS4_ROOT}/research/bin/WayOfTheSamurai4.unpacked.exe" CACHE FILEPATH "Decrypted exe")
     file(TO_NATIVE_PATH "${WOTS4_UNPACKED_EXE}" unpacked_native)
     wots4_add_probe(install_native_probe SOURCES tests/install_native_probe.cpp

@@ -1,11 +1,13 @@
-// fps_uncap: runs Way of the Samurai 4 at 60 logic updates (and frames) per second,
-// events and cut-ins included, in memory only.
+// fps_uncap: runs Way of the Samurai 4 at 30, 60, 90 or 120 logic updates (and frames)
+// per second, events and cut-ins included, in memory only. The player picks the rate on
+// an options page; it takes effect between two updates.
 //
 // The game waits for the next frame in its frame limiter (0x686bd0) and advances
 // everything by one fixed step per frame. The step is shared constants: f64 at
-// 0x99dca8 (limiter, game clock, timers, integration) and f32 at 0x97cdc4 and
-// 0x9ddd64 (the dt passed to the managers, UI animation). This Mod writes 1/60
-// to them once, at initialization.
+// 0x99dca8 (game clock, timers, integration) and f32 at 0x97cdc4 and 0x9ddd64 (the
+// dt passed to the managers, UI animation). This Mod writes 1/rate to them and
+// replaces the limiter, which kept time in f32 seconds, with one on the
+// performance counter.
 //
 // Some reads of 0x99dca8 turn the game's 30 fps frame counts (motion data,
 // effects, script arguments) into seconds or back; they are pointed at this
@@ -25,12 +27,14 @@
 // a count or an amount goes through a register: action script command waits,
 // balloon lives, the action end time-out, the water mill wheel, the physics kick
 // threshold, the sound fade step, effect repeat intervals, the vitality charm and
-// the motion of items and thrown weapons.
+// the motion of items and thrown weapons, and two counts compared as a sign-extended
+// byte that do not fit one at 90 and 120.
 #include <wots4/mod_api.h>
 #include <MinHook.h>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include "settings.h"
 #include "step_values.h"
 
 namespace {
@@ -40,13 +44,14 @@ using fps_uncap::PerUpdate;
 uintptr_t gameBase;
 HMODULE self;
 const wots4::HostApi* host;
+fps_uncap::Settings settings;
 
 uintptr_t va(uintptr_t address) { return gameBase+address-0x400000; }
 
 // HostApi only grows at the end, so an older ModLoader still serves this Mod when it
-// reaches releaseClaims, the last member used here.
+// reaches onOptionsSaved, the last member used here.
 bool hostHasUsedMembers(const wots4::HostApi* candidate) {
-    return candidate->size>=offsetof(wots4::HostApi,releaseClaims)+sizeof(candidate->releaseClaims);
+    return candidate->size>=offsetof(wots4::HostApi,onOptionsSaved)+sizeof(candidate->onOptionsSaved);
 }
 
 bool same(uintptr_t address, const unsigned char* bytes, size_t count) {
@@ -62,7 +67,8 @@ void log(const char* message) {
         host->log(self,message);
 }
 
-constexpr unsigned highUpdatesPerSecond = 60;
+// The rate in use. The hooks read it for counts that come from data.
+unsigned currentUpdatesPerSecond = fps_uncap::gameUpdatesPerSecond;
 
 // ---- Shared step constants
 
@@ -416,6 +422,7 @@ struct UpdateCountImmediate {
 constexpr uint32_t repeatDelay = 11;    // Updates before a held direction repeats
 constexpr uint32_t repeatInterval = 3;  // Updates between repeats
 constexpr uint32_t largestSignedByte = 127;  // An imm8 of cmp is sign-extended
+constexpr uint32_t largestUnsignedByte = 255;
 constexpr uint32_t saveListRepeatDelay = 5;     // Updates before a held direction repeats, minus one
 constexpr uint32_t saveListRepeatInterval = 1;  // Up and down: every 2 updates
 constexpr uint32_t saveListSideInterval = 2;    // Left and right: every 3 updates
@@ -453,14 +460,13 @@ UpdateCountImmediate updateCounts[] = {
     {0x43eb80,{0xb9,0x02,0x00,0x00,0x00},5,1,4,2,0},
     // Invincibility for the first 4 updates of an action (0x44a0c9, read by the hit check 0x487334)
     {0x44a0c9,{0xc7,0x81,0xf0,0x00,0x00,0x00,0x04,0x00,0x00,0x00},10,6,4,4,0},
-    // Rensatsu: kill slow motion over 8 updates (0x43e5f0), ending 30 and 10 updates (0x43d410),
-    // start waiting 60 updates when no script system exists (0x43cdce)
+    // Rensatsu: kill slow motion over 8 updates (0x43e5f0), ending 30 and 10 updates (0x43d410).
+    // The start wait (0x43cdce) is a code jump.
     {0x43e8c1,{0xc7,0x43,0x4c,0x08,0x00,0x00,0x00},7,3,4,8,0},
     {0x43e630,{0x83,0xf8,0x08},3,2,1,8,0},
     {0x43e638,{0xb9,0x08,0x00,0x00,0x00},5,1,4,8,0},
     {0x43d594,{0xc7,0x05,0xbc,0xe1,0x9d,0x00,0x1e,0x00,0x00,0x00},10,6,4,30,0,2,0x9de1bc},
     {0x43d59e,{0xc7,0x05,0xb8,0xe1,0x9d,0x00,0x0a,0x00,0x00,0x00},10,6,4,10,0,2,0x9de1b8},
-    {0x43cdce,{0x83,0x7b,0x24,0x3c},4,3,1,60,0},
     // AI: battle stance kept 15 updates (0x42b465), move arrival 3 and give-up 30 updates (0x42f540)
     {0x42b465,{0x83,0xbf,0x8c,0x00,0x00,0x00,0x0f},7,6,1,15,0},
     {0x42f611,{0x3c,0x03},2,1,1,3,0},
@@ -504,14 +510,15 @@ UpdateCountImmediate updateCounts[] = {
     {0x5ab921,{0x66,0xc7,0x86,0xe5,0x00,0x00,0x00,0x0a,0x00},9,7,1,10,0},
     {0x5ab932,{0x66,0xc7,0x86,0xe4,0x00,0x00,0x00,0x01,0x0a},9,8,1,10,0},
     {0x5aa415,{0x66,0xc7,0x80,0xe4,0x00,0x00,0x00,0x00,0x0a},9,8,1,10,0},
-    // Hang: end state cycle 60 and 30, time-out 100 and its sound at 50, input blocks 20 and 30
+    // Hang: end state cycle 60 and 30 (a byte compared unsigned, see unsignedBranches), time-out
+    // 100 (its sound at 50 is a code jump), input blocks 20 and 30
     {0x5a8925,{0x80,0xbb,0xc4,0x00,0x00,0x00,0x3c},7,6,1,60,0},
     {0x5a8935,{0x80,0xbb,0xc4,0x00,0x00,0x00,0x1e},7,6,1,30,0},
     {0x5a7e67,{0xba,0x64,0x00,0x00,0x00},5,1,4,100,0},
-    {0x5a7e8f,{0x66,0x83,0xbe,0xb6,0x00,0x00,0x00,0x32},8,7,1,50,0},
     {0x5a850f,{0xc7,0x83,0x98,0x00,0x00,0x00,0x14,0x00,0x00,0x00},10,6,4,20,0},
     {0x5a8580,{0xc7,0x83,0xb0,0x00,0x00,0x00,0x1e,0x00,0x00,0x00},10,6,4,30,0},
-    // Stone: level input lock 7 and 3, random level moves every 30 (first 40), landing 30, press 4
+    // Stone: level input lock 7 and 3, random level moves every 30 (first 40), landing 30, press 4.
+    // The level move byte [+0x510] only counts down to 0 (0x5a9e0b), so 160 at 120 works unsigned.
     {0x5a9af9,{0xb2,0x07},2,1,1,7,0},
     {0x5a9b62,{0x80,0xf9,0x03},3,2,1,3,0},
     {0x5a9e63,{0xc6,0x86,0x10,0x05,0x00,0x00,0x1e},7,6,1,30,0},
@@ -570,8 +577,20 @@ bool updateCountMatches(const UpdateCountImmediate& count) {
         same(count.instruction+afterAddress,count.bytes+afterAddress,count.length-afterAddress);
 }
 
+// cmp r/m32 (or r/m16), imm8 sign-extends the byte; the other 1-byte immediates are byte operands
+// (mov, cmp or add on a byte), whose fields are read as signed only where they stay below 128.
+bool signExtendsImmediate(const UpdateCountImmediate& count) {
+    constexpr unsigned char compareSignExtended = 0x83;
+    constexpr unsigned char operandSize16 = 0x66;
+    return count.bytes[0]==compareSignExtended ||
+        (count.bytes[0]==operandSize16 && count.bytes[1]==compareSignExtended);
+}
+
 bool immediateFits(const UpdateCountImmediate& count, unsigned updatesPerSecond) {
-    return count.immediateSize!=1 || immediateFor(count,updatesPerSecond)<=largestSignedByte;
+    if(count.immediateSize!=1)
+        return true;
+    const uint32_t largest=signExtendsImmediate(count) ? largestSignedByte : largestUnsignedByte;
+    return immediateFor(count,updatesPerSecond)<=largest;
 }
 
 bool writeImmediate(const UpdateCountImmediate& count, uint32_t value) {
@@ -678,7 +697,7 @@ bool actionScriptTimerCodeMatches() {
 int32_t __fastcall actionScriptTimerHook(uint8_t* timer, void*, uint32_t, uint32_t) {
     auto& elapsed=*reinterpret_cast<int32_t*>(timer+timerElapsedUpdates);
     const int32_t waitFrames=*reinterpret_cast<const int32_t*>(timer+timerWaitFrames);
-    if(elapsed>=fps_uncap::scaledHoldCount(waitFrames,highUpdatesPerSecond))
+    if(elapsed>=fps_uncap::scaledHoldCount(waitFrames,currentUpdatesPerSecond))
         return *reinterpret_cast<const int32_t*>(timer+timerJumpTarget);
     ++elapsed;
     return timerKeepRunning;
@@ -765,11 +784,82 @@ void writeLiveCameraSettings() {
 
 // ---- Frame limiter
 
-// The game's own wait (CFPSTimer, 0x686bd0) adds 0x99dca8 to the last frame time, so writing the
-// step there is all the frame rate needs.
-bool frameLimiterReadsStep() {
+// The game's wait (CFPSTimer, 0x686bd0, called only by the main loop at 0x4dd4fe) runs an update
+// once the last update time + 0x99dca8 has passed. It keeps the times in f32 seconds since the
+// first call, which after a few hours of play are only a few milliseconds fine and round every
+// 1/60 or 1/120 step. This Mod's wait does the same on the performance counter.
+constexpr uintptr_t frameLimiter = 0x686bd0;
+constexpr uint32_t frameLimiterHookLength = 6;  // push ebp; mov ebp,esp; sub esp,8
+constexpr uint32_t timerGameSeconds = 0x8;      // f32, read by scripts and others
+constexpr uint32_t timerGameTimeRuns = 0xc;     // byte, cleared by menus
+constexpr int64_t gameSpinMilliseconds = 30;    // The game sleeps only what is left beyond 30 ms
+
+bool frameLimiterCodeMatches() {
+    const unsigned char prologue[] = {0x55,0x8b,0xec,0x83,0xec,0x08};
     const unsigned char readStep[] = {0xdd,0x05};  // fld qword [0x99dca8]: next time = last + step
-    return same(0x686be4,readStep,sizeof(readStep)) && readGamePointer(0x686be6)==va(stepSeconds);
+    const unsigned char callLimiter[] = {0xe8};
+    const auto callNext=va(0x4dd503);
+    return same(frameLimiter,prologue,sizeof(prologue)) && same(0x686be4,readStep,sizeof(readStep)) &&
+        readGamePointer(0x686be6)==va(stepSeconds) && same(0x4dd4fe,callLimiter,sizeof(callLimiter)) &&
+        callNext+*reinterpret_cast<const int32_t*>(va(0x4dd4ff))==va(frameLimiter);
+}
+
+int64_t countsPerSecond;  // QueryPerformanceFrequency, set at installation
+int64_t countsPerUpdate;
+double gameStepSeconds;   // What the game adds to its clock per update, the value in 0x99dca8
+int64_t lastUpdateCount;
+int64_t lastRealignCount;
+
+int64_t performanceCount() {
+    LARGE_INTEGER count;
+    QueryPerformanceCounter(&count);
+    return count.QuadPart;
+}
+
+// The game sleeps only what is left beyond 30 ms and spins the rest (Sleep may oversleep by a
+// timer tick); at 30 updates per second and above that is at most 3 ms, as in the game.
+void sleepWhileFarFromDue(int64_t countsLeft) {
+    const int64_t millisecondsToSleep=countsLeft*1000/countsPerSecond-gameSpinMilliseconds;
+    if(millisecondsToSleep>0)
+        Sleep(static_cast<DWORD>(millisecondsToSleep));
+}
+
+// Called by the main loop thousands of times per update while it waits: arithmetic and QPC only.
+// force runs an update now. Like the game, a late update runs right away and the next ones catch
+// up step by step, but about every second the schedule is moved to now, so at most a second
+// is caught up.
+bool __cdecl updateIsDue(uint8_t* timer, uint32_t force) {
+    constexpr int64_t realignAfterMilliseconds = 999;  // 0x99dca0
+    if(!force) {
+        const int64_t now=performanceCount();
+        const int64_t due=lastUpdateCount+countsPerUpdate;
+        if(now<due) {
+            sleepWhileFarFromDue(due-now);
+            return false;
+        }
+        if((now-lastRealignCount)*1000>=realignAfterMilliseconds*countsPerSecond)
+            lastUpdateCount=lastRealignCount=now;
+        else
+            lastUpdateCount=due;
+    }
+    // The game also sets the clock to 0 when it equals DBL_MAX (0x99dc98), which a float never does.
+    if(timer[timerGameTimeRuns]) {
+        auto& gameSeconds=*reinterpret_cast<float*>(timer+timerGameSeconds);
+        gameSeconds=static_cast<float>(gameSeconds+gameStepSeconds);
+    }
+    return true;
+}
+
+// The game's call: esi = the timer, [esp+4] = force (a byte), ret 4, al = 1 when an update is due.
+__declspec(naked) void frameLimiterHook() {
+    __asm {
+        movzx eax, byte ptr [esp+4]
+        push eax
+        push esi
+        call updateIsDue
+        add esp, 8
+        ret 4
+    }
 }
 
 // ---- Event scenes, script waits and sound fades
@@ -822,7 +912,7 @@ bool scriptWaitCodeMatches() {
 uint32_t __fastcall scriptWaitStartHook(uint8_t* wait, void* unused, uint32_t first, uint32_t second) {
     uint32_t result=originalScriptWaitStart(wait,unused,first,second);
     auto& frames=*reinterpret_cast<int32_t*>(wait+scriptWaitFrames);
-    frames=fps_uncap::scaledHoldCount(frames,highUpdatesPerSecond);
+    frames=fps_uncap::scaledHoldCount(frames,currentUpdatesPerSecond);
     return result;
 }
 
@@ -833,19 +923,25 @@ uint32_t __fastcall scriptWaitStartHook(uint8_t* wait, void* unused, uint32_t fi
 // jumps back. Nothing jumps into the middle of a replaced range.
 
 int __cdecl commandHoldFor(int frames) {  // 0 means "next command now" and is kept
-    return frames>0 ? fps_uncap::scaledHoldCount(frames,highUpdatesPerSecond) : frames;
+    return frames>0 ? fps_uncap::scaledHoldCount(frames,currentUpdatesPerSecond) : frames;
 }
 
 int __cdecl holdFor(int frames) {
-    return fps_uncap::scaledHoldCount(frames,highUpdatesPerSecond);
+    return fps_uncap::scaledHoldCount(frames,currentUpdatesPerSecond);
 }
 
 // The jmp stubs return here, set at installation.
 uintptr_t commandWaitResume, balloonLifetimeResume, actionEndKeepWaiting, actionEndTimedOut,
     millStepResume, kickThresholdResume, soundFadeResume, bloodDropResume, placedEffectResume,
-    placedEffectRestartResume, charmVitalityResume, itemMoveResume;
+    placedEffectRestartResume, charmVitalityResume, itemMoveResume, rensatsuStartKeepWaiting,
+    rensatsuStartWaited, hangTimeoutSoundNotYet, hangTimeoutSoundNow;
 constexpr uint32_t actionEndTimeoutAtGameRate = 90;
 int32_t actionEndTimeoutUpdates;
+// Compared as a sign-extended imm8 by the game, so 180 and 240 (at 90 and 120) need a stub.
+constexpr uint32_t rensatsuStartWaitAtGameRate = 60;
+constexpr uint32_t hangTimeoutSoundAtGameRate = 50;
+int32_t rensatsuStartWaitUpdates;
+int32_t hangTimeoutSoundUpdates;
 
 // Action script command wait (0x40b8ff): the handler returned a count of 30 fps frames in eax;
 // the script stays on the command until [+0x218] passes it (0x40b970). Once per command.
@@ -974,6 +1070,34 @@ __declspec(naked) void actionEndTimeoutStub() {
     }
 }
 
+// Rensatsu start (0x43cdce): with no script system it waits while [ebx+0x24] <= 60 updates.
+__declspec(naked) void rensatsuStartWaitStub() {
+    __asm {
+        push eax
+        mov eax, rensatsuStartWaitUpdates
+        cmp dword ptr [ebx+0x24], eax
+        pop eax
+        jle keepWaiting
+        jmp dword ptr [rensatsuStartWaited]
+    keepWaiting:
+        jmp dword ptr [rensatsuStartKeepWaiting]
+    }
+}
+
+// Hang time-out (0x5a7e8f, every update): the sound plays when the word [esi+0xb6] reaches 50.
+__declspec(naked) void hangTimeoutSoundStub() {
+    __asm {
+        push eax
+        movsx eax, word ptr [esi+0xb6]
+        cmp eax, hangTimeoutSoundUpdates
+        pop eax
+        jne notYet
+        jmp dword ptr [hangTimeoutSoundNow]
+    notYet:
+        jmp dword ptr [hangTimeoutSoundNotYet]
+    }
+}
+
 // Water mill wheel (0x5ab012, every update): the animation time [+0x84] moves back by the
 // speed, kept on the x87 stack and used again after; the moved share of it is what is kept.
 __declspec(naked) void millStepStub() {
@@ -1050,7 +1174,37 @@ CodeJump codeJumps[] = {
     // fld [esi+8]; fadd [edi]; fstp [esi+8], and the same for +4 / +0xc and +8 / +0x10
     {0x520ab6,{0xd9,0x46,0x08,0xd8,0x07,0xd9,0x5e,0x08,0xd9,0x47,0x04,0xd8,0x46,0x0c,0xd9,0x5e,0x0c,0xd9,0x47,
         0x08,0xd8,0x46,0x10,0xd9,0x5e,0x10},26,itemMoveStub,&itemMoveResume,0x520ad0},
+    // cmp dword [ebx+0x24],0x3c; jle 0x43cdf7
+    {0x43cdce,{0x83,0x7b,0x24,0x3c,0x7e,0x23},6,rensatsuStartWaitStub,&rensatsuStartWaited,0x43cdd4,
+        &rensatsuStartKeepWaiting,0x43cdf7},
+    // cmp word [esi+0xb6],0x32; jne 0x5a7eb2
+    {0x5a7e8f,{0x66,0x83,0xbe,0xb6,0x00,0x00,0x00,0x32,0x75,0x19},10,hangTimeoutSoundStub,&hangTimeoutSoundNow,
+        0x5a7e99,&hangTimeoutSoundNotYet,0x5a7eb2},
 };
+
+// ---- Branches made unsigned
+
+// The hang end state cycle (0x5a8910) counts a byte [ebx+0xc4] up to 60 and back to 0, and acts
+// while it is below 30. At 90 and 120 the counts pass 127, which the game's signed jge reads as
+// negative; unsigned branches give the same result at every rate. Restarting at "reached" instead
+// of "equal" also keeps a count left above a lower rate's cycle from running past it.
+struct BranchOpcode {
+    uintptr_t site;
+    unsigned char original;
+    unsigned char replacement;
+};
+
+const BranchOpcode unsignedBranches[] = {
+    {0x5a892c,0x75,0x72},  // jne -> jb: restart the cycle once it reached its length
+    {0x5a893c,0x7d,0x73},  // jge -> jae: the second half of the cycle
+};
+
+bool unsignedBranchesMatch() {
+    for(auto& branch:unsignedBranches)
+        if(!same(branch.site,&branch.original,1))
+            return false;
+    return true;
+}
 
 bool codeJumpMatches(const CodeJump& jump) {
     if(!jump.addressOffset)
@@ -1096,6 +1250,22 @@ bool writeCodeJumps() {
     return true;
 }
 
+void restoreUnsignedBranches(size_t count) {
+    for(size_t i=0;i<count;++i)
+        writeCode(unsignedBranches[i].site,&unsignedBranches[i].original,1);
+}
+
+// Writes every branch, or none of them.
+bool writeUnsignedBranches() {
+    for(size_t i=0;i<ARRAYSIZE(unsignedBranches);++i) {
+        if(!writeCode(unsignedBranches[i].site,&unsignedBranches[i].replacement,1)) {
+            restoreUnsignedBranches(i);
+            return false;
+        }
+    }
+    return true;
+}
+
 // ---- Torture functions replaced whole
 
 // Hang (vt+0x30 0x5a6fc0, read by UITorture 0x5e10a5): the seconds left are [+0xb8], a count
@@ -1112,7 +1282,7 @@ bool hangSecondsLeftCodeMatches() {
 }
 
 int32_t __fastcall hangSecondsLeftHook(uint8_t* hang) {
-    return *reinterpret_cast<const int32_t*>(hang+hangClearUpdatesLeft)/static_cast<int32_t>(highUpdatesPerSecond);
+    return *reinterpret_cast<const int32_t*>(hang+hangClearUpdatesLeft)/static_cast<int32_t>(currentUpdatesPerSecond);
 }
 
 // The press window of all three tortures (vt+0x2c 0x5a4cc0): thiscall with the torturer's
@@ -1145,7 +1315,7 @@ uint32_t __fastcall pressWindowHook(uint8_t* torture, void*, int32_t animation) 
     auto vtable=*reinterpret_cast<const uintptr_t* const*>(torture);
     auto isSwinging=reinterpret_cast<int32_t (__thiscall*)(void*)>(vtable[isSwingingSlot]);
     const int32_t frame=*reinterpret_cast<const int32_t*>(torture+swingUpdates)*
-        static_cast<int32_t>(fps_uncap::gameUpdatesPerSecond)/static_cast<int32_t>(highUpdatesPerSecond);
+        static_cast<int32_t>(fps_uncap::gameUpdatesPerSecond)/static_cast<int32_t>(currentUpdatesPerSecond);
     if(!isSwinging(torture))
         return inside(frame,beforeSwingWindow);
     if(animation!=swingAnimation)
@@ -1160,12 +1330,17 @@ uint32_t __fastcall pressWindowHook(uint8_t* torture, void*, int32_t animation) 
 
 // Writes every value for updatesPerSecond. FALSE if an immediate could not be written.
 bool applyRate(unsigned updatesPerSecond) {
+    currentUpdatesPerSecond=updatesPerSecond;
     auto step=fps_uncap::stepFor(updatesPerSecond);
     *reinterpret_cast<double*>(va(stepSeconds))=step.seconds;
     *reinterpret_cast<float*>(va(managerStepSeconds))=step.secondsFloat;
     *reinterpret_cast<float*>(va(layoutStepSeconds))=step.secondsFloat;
+    gameStepSeconds=step.seconds;
+    countsPerUpdate=countsPerSecond/updatesPerSecond;
     thirtyFpsFramesPerUpdate=fps_uncap::perUpdateValue(PerUpdate::amount,1.0,updatesPerSecond);
     actionEndTimeoutUpdates=static_cast<int32_t>(fps_uncap::scaledUpdateCount(actionEndTimeoutAtGameRate,updatesPerSecond));
+    rensatsuStartWaitUpdates=static_cast<int32_t>(fps_uncap::scaledUpdateCount(rensatsuStartWaitAtGameRate,updatesPerSecond));
+    hangTimeoutSoundUpdates=static_cast<int32_t>(fps_uncap::scaledUpdateCount(hangTimeoutSoundAtGameRate,updatesPerSecond));
     for(auto& redirect:redirects)
         setRedirectValue(redirect,updatesPerSecond);
     bool written=true;
@@ -1184,7 +1359,7 @@ void rewriteExistingObjects(unsigned updatesPerSecond) {
 
 // ---- Installation
 
-// .rdata is read-only; the step constants stay writable so the scene switch is a plain store.
+// .rdata is read-only; the step constants stay writable so a rate change is a plain store.
 bool makeWritable(uintptr_t address, uint32_t length) {
     DWORD previous;
     return VirtualProtect(reinterpret_cast<void*>(va(address)),length,PAGE_READWRITE,&previous)!=FALSE;
@@ -1222,14 +1397,18 @@ bool redirectOperands() {
 }
 
 const char* codeMismatch() {
-    if(!frameLimiterReadsStep())
+    if(!frameLimiterCodeMatches())
         return "the frame limiter at 0x686bd0";
     for(auto& redirect:redirects)
         if(!redirectMatches(redirect))
             return "an instruction that reads a time constant";
-    for(auto& count:updateCounts)
-        if(!updateCountMatches(count) || !immediateFits(count,highUpdatesPerSecond))
+    for(auto& count:updateCounts) {
+        if(!updateCountMatches(count))
             return "an instruction that holds a count of updates";
+        for(auto rate:fps_uncap::selectableUpdatesPerSecond)
+            if(!immediateFits(count,rate))
+                return "an instruction that holds a count of updates too large for its immediate";
+    }
     if(!keyRepeatCodeMatches())
         return "the menu key repeat";
     if(!saveListCodeMatches())
@@ -1249,6 +1428,8 @@ const char* codeMismatch() {
         return "the hang seconds at 0x5a6fc0";
     if(!pressWindowCodeMatches())
         return "the torture press window at 0x5a4cc0";
+    if(!unsignedBranchesMatch())
+        return "the hang end state cycle at 0x5a8910";
     if(*reinterpret_cast<const uint64_t*>(va(stepSeconds))!=originalStepBits ||
         *reinterpret_cast<const uint32_t*>(va(managerStepSeconds))!=originalStepFloatBits ||
         *reinterpret_cast<const uint32_t*>(va(layoutStepSeconds))!=originalStepFloatBits)
@@ -1257,7 +1438,8 @@ const char* codeMismatch() {
 }
 
 bool claimAll() {
-    bool claimed=host->claim(self,va(actionScriptTimer),actionScriptTimerHookLength) &&
+    bool claimed=host->claim(self,va(frameLimiter),frameLimiterHookLength) &&
+        host->claim(self,va(actionScriptTimer),actionScriptTimerHookLength) &&
         host->claim(self,va(advanceScene),advanceSceneHookLength) &&
         host->claim(self,va(scriptWaitStart),scriptWaitStartHookLength) &&
         host->claim(self,va(hangSecondsLeft),hangSecondsLeftHookLength) &&
@@ -1271,10 +1453,13 @@ bool claimAll() {
         claimed=claimed&&host->claim(self,va(count.instruction+count.immediateOffset),count.immediateSize);
     for(auto& jump:codeJumps)
         claimed=claimed&&host->claim(self,va(jump.site),jump.length);
+    for(auto& branch:unsignedBranches)
+        claimed=claimed&&host->claim(self,va(branch.site),1);
     return claimed;
 }
 
 // MinHook's trampolines of the replaced functions; their hooks never call them
+void* replacedFrameLimiter;
 void* replacedActionScriptTimer;
 void* replacedHangSecondsLeft;
 void* replacedPressWindow;
@@ -1286,6 +1471,7 @@ struct Hook {
 };
 
 const Hook hooks[] = {
+    {frameLimiter,reinterpret_cast<void*>(&frameLimiterHook),&replacedFrameLimiter},
     {actionScriptTimer,reinterpret_cast<void*>(&actionScriptTimerHook),&replacedActionScriptTimer},
     {advanceScene,reinterpret_cast<void*>(&advanceSceneHook),&originalAdvanceScene},
     {scriptWaitStart,reinterpret_cast<void*>(&scriptWaitStartHook),reinterpret_cast<void**>(&originalScriptWaitStart)},
@@ -1298,7 +1484,7 @@ void removeHooks(size_t count) {
         MH_RemoveHook(reinterpret_cast<void*>(va(hooks[i].target)));
 }
 
-// Creates and enables every hook and code jump, or none of them. Needs MinHook initialized.
+// Creates and enables every hook, code jump and branch, or none of them. Needs MinHook initialized.
 bool hookGame() {
     for(size_t i=0;i<ARRAYSIZE(hooks);++i) {
         if(MH_CreateHook(reinterpret_cast<void*>(va(hooks[i].target)),hooks[i].detour,hooks[i].original)!=MH_OK) {
@@ -1310,7 +1496,13 @@ bool hookGame() {
         removeHooks(ARRAYSIZE(hooks));
         return false;
     }
+    if(!writeUnsignedBranches()) {
+        restoreCodeJumps(ARRAYSIZE(codeJumps));
+        removeHooks(ARRAYSIZE(hooks));
+        return false;
+    }
     if(MH_EnableHook(MH_ALL_HOOKS)!=MH_OK) {
+        restoreUnsignedBranches(ARRAYSIZE(unsignedBranches));
         restoreCodeJumps(ARRAYSIZE(codeJumps));
         removeHooks(ARRAYSIZE(hooks));
         return false;
@@ -1320,17 +1512,55 @@ bool hookGame() {
 
 bool installed;
 
+// ---- The rate chosen on the options page
+
+// After the game's update, so every system sees one rate for a whole update. Rare: only when the
+// player chose another rate.
+void WINAPI applyChosenRate(void*) {
+    if(!settings.takeRateChange())
+        return;
+    const unsigned updatesPerSecond=settings.updatesPerSecond();
+    const bool written=applyRate(updatesPerSecond);
+    rewriteExistingObjects(updatesPerSecond);
+    char line[200];
+    if(written)
+        sprintf_s(line,"frame rate changed to %u updates per second",updatesPerSecond);
+    else
+        sprintf_s(line,"frame rate changed to %u updates per second, but some counts of updates could not be "
+            "written (VirtualProtect) and keep the previous rate",updatesPerSecond);
+    log(line);
+}
+
+void WINAPI saveSettings(void*) { settings.save(); }
+
+// Without the frame callback a chosen rate could not be applied, so the page is left out then.
+void addSettingsPage(const wots4::ModContext& context) {
+    if(!host->onFrame(self,applyChosenRate,nullptr)) {
+        log("the ModLoader refused the frame callback; no options page, the rate can be changed in config.ini");
+        return;
+    }
+    if(!host->onOptionsSaved(self,saveSettings,nullptr))
+        log("the ModLoader refused the options save callback; a rate chosen on the options page is not saved");
+    if(!settings.registerPage(context))
+        log("the ModLoader refused the options page; the rate can be changed in config.ini");
+}
+
 }  // namespace
 
 extern "C" BOOL WINAPI ModInitialize(const wots4::ModContext* context) {
     if(!context||context->size<sizeof(*context)||context->version!=wots4::modApiVersion||!context->host||
-        !hostHasUsedMembers(context->host)||!context->host->claim||!context->host->releaseClaims)
+        !hostHasUsedMembers(context->host)||!context->host->claim||!context->host->releaseClaims||
+        !context->host->addOptionsPage||!context->host->onFrame||!context->host->onOptionsSaved||
+        !context->directory)
         return FALSE;
     if(installed)
         return TRUE;
     host=context->host;
     self=context->module;
     gameBase=reinterpret_cast<uintptr_t>(context->game);
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    countsPerSecond=frequency.QuadPart;
 
     if(auto mismatch=codeMismatch()) {
         char line[200];
@@ -1348,7 +1578,9 @@ extern "C" BOOL WINAPI ModInitialize(const wots4::ModContext* context) {
         host->releaseClaims(self);
         return FALSE;
     }
-    if(!applyRate(highUpdatesPerSecond)) {
+    settings.load(context->directory,log);
+    const unsigned chosenUpdatesPerSecond=settings.updatesPerSecond();
+    if(!applyRate(chosenUpdatesPerSecond)) {
         log("failed to write the counts of updates (VirtualProtect); nothing changed");
         applyRate(fps_uncap::gameUpdatesPerSecond);
         host->releaseClaims(self);
@@ -1359,10 +1591,10 @@ extern "C" BOOL WINAPI ModInitialize(const wots4::ModContext* context) {
         host->releaseClaims(self);
         return FALSE;
     }
-    rewriteExistingObjects(highUpdatesPerSecond);
+    rewriteExistingObjects(chosenUpdatesPerSecond);
     if(MH_Initialize()!=MH_OK||!hookGame()) {
-        log("failed to hook the action script timer, the event scene clock, the script Wait or the sound "
-            "fade (MinHook or VirtualProtect); nothing changed");
+        log("failed to hook the frame limiter, the action script timer, the event scene clock, the script Wait "
+            "or the code jumps (MinHook or VirtualProtect); nothing changed");
         MH_Uninitialize();
         restoreOperands(ARRAYSIZE(redirects));
         applyRate(fps_uncap::gameUpdatesPerSecond);
@@ -1373,8 +1605,9 @@ extern "C" BOOL WINAPI ModInitialize(const wots4::ModContext* context) {
     installed=true;
     char line[200];
     sprintf_s(line,"installed: %u updates per second, scripts included; %u reads redirected, "
-        "%u update counts scaled, %u hooks",highUpdatesPerSecond,static_cast<unsigned>(ARRAYSIZE(redirects)),
+        "%u update counts scaled, %u hooks",chosenUpdatesPerSecond,static_cast<unsigned>(ARRAYSIZE(redirects)),
         static_cast<unsigned>(ARRAYSIZE(updateCounts)),static_cast<unsigned>(ARRAYSIZE(hooks)+ARRAYSIZE(codeJumps)));
     log(line);
+    addSettingsPage(*context);
     return TRUE;
 }
