@@ -14,10 +14,8 @@ endif()
 
 wots4_use_minhook()
 
-# A prototype: not released yet.
 wots4_add_mod(fps_uncap SOURCES src/mod.cpp DEF src/mod.def
-    LIBS wots4_minhook
-    NO_RELEASE)
+    LIBS wots4_minhook)
 target_include_directories(mod_fps_uncap PRIVATE src)
 
 if(WOTS4_BUILD_TESTS)
