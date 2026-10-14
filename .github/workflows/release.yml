@@ -1,6 +1,6 @@
 name: Release
 
-# この Mod だけを mods/<名前>/ の形で zip にしてリリースする（ModLoader は含めない）
+# Release only this Mod, zipped as mods/<name>/ (the ModLoader is not included)
 on:
   push:
     tags: ["v*"]
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  WOTS4_SDK_REF: d2c4849c3ba7f71a7d05dc65c0f30fb10de7facd
+  WOTS4_SDK_REF: v2026.10.14
   MOD_NAME: fps_uncap
 
 jobs:
@@ -25,13 +25,12 @@ jobs:
           repository: nagataaaas/wots4-mods
           ref: ${{ env.WOTS4_SDK_REF }}
           path: sdk
-          token: ${{ secrets.WOTS4_SDK_TOKEN || github.token }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: テスト用の Python パッケージを入れる
+      - name: install Python packages for tests
         run: python -m pip install cryptography
 
       - name: build and test
@@ -40,15 +39,15 @@ jobs:
           cmake --build build --config Release
           ctest --test-dir build -C Release -LE needs_exe --output-on-failure --timeout 300
 
-      # NO_RELEASE の Mod は install の対象にならないので、ここで止まる
-      - name: zip を作る
+      # A NO_RELEASE Mod is not an install target, so the job stops here
+      - name: create zip
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}"
           $name = "${{ env.MOD_NAME }}"
           cmake --install build --config Release --component $name --prefix stage
           if (-not (Test-Path "stage/mods/$name/mod.dll")) {
-            Write-Error "mod.dll がありません。CMakeLists.txt の NO_RELEASE を外してからタグを付けてください。"
+            Write-Error "mod.dll not found. Remove NO_RELEASE from CMakeLists.txt before tagging."
             exit 1
           }
           New-Item -ItemType Directory -Force dist | Out-Null
@@ -56,8 +55,9 @@ jobs:
           Compress-Archive -Path stage/* -DestinationPath "dist/wots4-mod-$zipName-$version.zip"
           Get-ChildItem -Recurse stage
 
-      - name: Release を作る
+      # The working directory is not a git checkout (the Mod is checked out to mod/), so name the repository
+      - name: create Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/*.zip --title "${{ env.MOD_NAME }} ${{ github.ref_name }}" --generate-notes
+        run: gh release create "${{ github.ref_name }}" dist/*.zip --repo "${{ github.repository }}" --title "${{ env.MOD_NAME }} ${{ github.ref_name }}" --generate-notes
