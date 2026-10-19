@@ -8,7 +8,7 @@ on:
 
 env:
   # ModLoader (Mod SDK) version used for the build: a wots4-mods tag or commit
-  WOTS4_SDK_REF: v2026.10.14
+  WOTS4_SDK_REF: v2026.10.19
 
 jobs:
   build:

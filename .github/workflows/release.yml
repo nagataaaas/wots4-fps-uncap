@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  WOTS4_SDK_REF: v2026.10.14
+  WOTS4_SDK_REF: v2026.10.19
   MOD_NAME: fps_uncap
 
 jobs:
